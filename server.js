@@ -1,12 +1,16 @@
 import ExcelJS from 'exceljs'
 import { neon } from '@neondatabase/serverless'
 import { del, put } from '@vercel/blob'
-import { createHash, randomUUID } from 'node:crypto'
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import express from 'express'
 import multer from 'multer'
 import { access, mkdir, readFile, unlink, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  InvalidOpeningsWorkbookError,
+  parseOpeningsWorkbook,
+} from './src/openings-workbook.js'
 
 const projectDirectory = path.dirname(fileURLToPath(import.meta.url))
 const production = process.argv.includes('--production')
@@ -93,6 +97,18 @@ const resumeUpload = multer({
     callback(null, true)
   },
 })
+const openingsWorkbookUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 2 * 1024 * 1024, files: 1 },
+  fileFilter(_request, file, callback) {
+    if (path.extname(file.originalname).toLowerCase() !== '.xlsx') {
+      callback(new Error('Please upload an .xlsx workbook.'))
+      return
+    }
+
+    callback(null, true)
+  },
+})
 
 app.use(express.json({ limit: '20kb' }))
 
@@ -123,6 +139,54 @@ app.get('/api/openings', async (_request, response) => {
     })
   }
 })
+
+app.post(
+  '/api/admin/openings',
+  authorizeOpeningsAdmin,
+  handleOpeningsWorkbookUpload,
+  async (request, response) => {
+    if (!request.file) {
+      return response.status(400).json({ error: 'Please select an .xlsx workbook.' })
+    }
+
+    let openings
+    try {
+      openings = await parseOpeningsWorkbook(request.file.buffer)
+    } catch (error) {
+      if (error instanceof InvalidOpeningsWorkbookError) {
+        return response.status(400).json({ error: error.message })
+      }
+
+      console.error('Failed to parse openings workbook', error)
+      return response.status(500).json({
+        error: 'We could not read this workbook. Please check the file and try again.',
+      })
+    }
+
+    try {
+      if (isVercel) {
+        const sql = await getDatabase()
+        await sql.transaction([
+          sql`DELETE FROM aeams_openings`,
+          ...openings.map(
+            ({ position, location }) =>
+              sql`INSERT INTO aeams_openings (position, location)
+                  VALUES (${position}, ${location})`,
+          ),
+        ])
+      } else {
+        await writeFile(openingsFilePath, request.file.buffer)
+      }
+
+      return response.json({ openingsCount: openings.length })
+    } catch (error) {
+      console.error('Failed to update openings from workbook', error)
+      return response.status(500).json({
+        error: 'We could not update job openings. Please try again later.',
+      })
+    }
+  },
+)
 
 app.post('/api/inquiries', handleResumeUpload, async (request, response) => {
   if (!request.file) {
@@ -318,6 +382,63 @@ function handleResumeUpload(request, response, next) {
     if (error instanceof multer.MulterError) {
       return response.status(400).json({
         error: 'Please upload only one resume file.',
+      })
+    }
+
+    return response.status(400).json({ error: error.message })
+  })
+}
+
+function authorizeOpeningsAdmin(request, response, next) {
+  const expectedToken = process.env.ADMIN_UPLOAD_TOKEN
+  if (!expectedToken) {
+    return response.status(503).json({
+      error: 'Excel uploads are not configured. Set ADMIN_UPLOAD_TOKEN in Vercel project settings.',
+    })
+  }
+
+  const [scheme, providedToken, ...extraParts] = (
+    request.get('authorization') || ''
+  ).split(' ')
+  if (
+    scheme?.toLowerCase() !== 'bearer' ||
+    !providedToken ||
+    extraParts.length > 0
+  ) {
+    return response.status(401).json({ error: 'Enter the admin upload token.' })
+  }
+
+  const expected = Buffer.from(expectedToken)
+  const provided = Buffer.from(providedToken)
+  if (
+    expected.length !== provided.length ||
+    !timingSafeEqual(expected, provided)
+  ) {
+    return response.status(401).json({ error: 'The admin upload token is incorrect.' })
+  }
+
+  return next()
+}
+
+function handleOpeningsWorkbookUpload(request, response, next) {
+  openingsWorkbookUpload.single('workbook')(request, response, (error) => {
+    if (!error) {
+      next()
+      return
+    }
+
+    if (
+      error instanceof multer.MulterError &&
+      error.code === 'LIMIT_FILE_SIZE'
+    ) {
+      return response.status(413).json({
+        error: 'Excel workbooks must be 2 MB or smaller.',
+      })
+    }
+
+    if (error instanceof multer.MulterError) {
+      return response.status(400).json({
+        error: 'Please upload only one workbook.',
       })
     }
 

@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react'
 import './App.css'
+import './Admin.css'
 
 const URGENT_HIRING_LIFETIME_MS = 24 * 60 * 60 * 1000
 const URGENT_HIRING_POPUP_SUPPRESSED_KEY = 'aeams.urgent-hiring-popup-suppressed'
@@ -1530,6 +1531,10 @@ function App() {
     }
   }, [isUrgentHiringPopupOpen])
 
+  if (window.location.pathname === '/admin/openings') {
+    return <AdminOpeningsPage />
+  }
+
   if (window.location.pathname === '/contact') {
     return <ContactPage />
   }
@@ -1975,6 +1980,98 @@ function App() {
         <SiteFooter />
       </div>
     </div>,
+  )
+}
+
+function AdminOpeningsPage() {
+  const [token, setToken] = useState('')
+  const [isUploading, setIsUploading] = useState(false)
+  const [message, setMessage] = useState(null)
+
+  async function handleUpload(event) {
+    event.preventDefault()
+    const formData = new FormData(event.currentTarget)
+    setIsUploading(true)
+    setMessage(null)
+
+    try {
+      const response = await fetch('/api/admin/openings', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      })
+      const isJson = response.headers
+        .get('content-type')
+        ?.includes('application/json')
+      const result = isJson ? await response.json() : null
+
+      if (!response.ok) {
+        throw new Error(
+          result?.error || `Upload failed with status ${response.status}.`,
+        )
+      }
+
+      setMessage({
+        type: 'success',
+        text: `Updated ${result.openingsCount} job openings.`,
+      })
+      event.currentTarget.reset()
+      setToken('')
+    } catch (error) {
+      console.error('Failed to upload openings workbook', error)
+      setMessage({
+        type: 'error',
+        text: error.message || 'We could not upload the workbook. Please try again.',
+      })
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  return (
+    <main className="admin-upload-page">
+      <section className="admin-upload-card" aria-labelledby="admin-upload-title">
+        <a className="admin-upload-back" href="/">
+          Back to AEAMS
+        </a>
+        <h1 id="admin-upload-title">Update job openings</h1>
+        <p>
+          Upload an Excel workbook with an <strong>Openings</strong> worksheet
+          and <strong>Position</strong> and <strong>Location</strong> columns.
+          This replaces the current Vercel job-opening list.
+        </p>
+        <form className="admin-upload-form" onSubmit={handleUpload}>
+          <label>
+            Admin upload token
+            <input
+              type="password"
+              name="adminToken"
+              autoComplete="current-password"
+              value={token}
+              onChange={(event) => setToken(event.target.value)}
+              required
+            />
+          </label>
+          <label>
+            Excel workbook (.xlsx, max 2 MB)
+            <input
+              type="file"
+              name="workbook"
+              accept=".xlsx"
+              required
+            />
+          </label>
+          <button type="submit" disabled={isUploading}>
+            {isUploading ? 'Uploading…' : 'Upload and update'}
+          </button>
+        </form>
+        {message && (
+          <p className={`admin-upload-message ${message.type}`} role="status">
+            {message.text}
+          </p>
+        )}
+      </section>
+    </main>
   )
 }
 

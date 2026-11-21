@@ -8,7 +8,8 @@
     "build": "vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "start": "node server.js --production"
+    "start": "node server.js --production",
+    "test": "node --test"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.2.1",

@@ -8,6 +8,7 @@ AEAMS is a responsive attendance dashboard for monitoring student and staff chec
 - `npm run dev`
 - `npm run build`
 - `npm run lint`
+- `npm test`
 
 ## Inquiry form storage
 
@@ -35,7 +36,9 @@ AEAMS is a responsive attendance dashboard for monitoring student and staff chec
 - Vercel serves the Vite build and routes `/api/*` to the Express API.
 - Connect a Neon Postgres database with `DATABASE_URL` and a private Vercel Blob store with `BLOB_READ_WRITE_TOKEN` in the Vercel project settings.
 - On Vercel, inquiry records are stored in Neon and resumes in private Blob storage. The database tables are created automatically when the API is first used.
-- Local development continues to use the Excel workbooks. Vercel starts with empty openings tables; add job listings to `aeams_openings` and `aeams_urgent_hiring` in the Neon SQL editor before publishing hiring information.
+- Local development continues to use the Excel workbooks. Vercel job-search data can be updated by uploading an `.xlsx` workbook at `/admin/openings`; it must contain an `Openings` sheet with `Position` and `Location` headers.
+- Set a strong `ADMIN_UPLOAD_TOKEN` environment variable in the Vercel project before using the admin upload page. The uploaded workbook replaces the current job-search openings; invalid or empty sheets are rejected.
+- Vercel starts with empty openings tables. The current local workbook is not automatically uploaded during deployment.
 
 ## Available job openings
 
