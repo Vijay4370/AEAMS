@@ -8,15 +8,15 @@ AEAMS is a responsive attendance dashboard for monitoring student and staff chec
 - `npm run dev`
 - `npm run build`
 - `npm run lint`
+- `npm test`
 
 ## Inquiry form storage
 
 - `npm run dev` starts the Vite website and the Node API together.
 - Form submissions are appended to role-specific Excel files in `data/inquiries/`.
-- Resumes are required and accept PDF, DOC, or DOCX files up to 5 MB. Files are stored privately in `data/resumes/`, and the corresponding workbook row records the saved path.
+- Resumes are required and accept PDF, DOC, or DOCX files up to 4 MB. Local submissions are stored in `data/resumes/`; Vercel submissions use private Blob storage.
 - `npm start` serves the production build and API together. Build first with `npm run build`.
-- Set `INQUIRIES_DIR` to a persistent server directory when deploying; temporary or ephemeral hosting storage will not retain inquiry files.
-- Set `RESUMES_DIR` to persistent server storage when deploying so uploaded resumes are retained.
+- For non-Vercel deployments, set `INQUIRIES_DIR` and `RESUMES_DIR` to persistent server storage; temporary or ephemeral hosting storage will not retain inquiry files or resumes.
 
 ## Urgent hiring posters
 
@@ -29,7 +29,16 @@ AEAMS is a responsive attendance dashboard for monitoring student and staff chec
 - Any legacy `Posted At (UTC)` values are used once to preserve existing posters during migration; new rows always start their own 24-hour timer when detected, even if an old timestamp was copied into the row.
 - Rows without a Position in column A are skipped and reported on the hiring page. Posters expire and disappear from the website after 24 hours; expired source rows can be removed from Excel when convenient.
 - The `/urgent-hiring` page fetches the workbook-backed openings and refreshes every 5 seconds, so saved Excel changes appear automatically. The API also checks for expired entries every 30 minutes.
-- Keep the workbook in persistent server storage when deploying. The optional `URGENT_HIRING_DIR` environment variable can point to that directory.
+- For non-Vercel deployments, keep the workbook in persistent server storage. The optional `URGENT_HIRING_DIR` environment variable can point to that directory.
+
+## Vercel deployment
+
+- Vercel serves the Vite build and routes `/api/*` to the Express API.
+- Connect a Neon Postgres database with `DATABASE_URL` and a private Vercel Blob store with `BLOB_READ_WRITE_TOKEN` in the Vercel project settings.
+- On Vercel, inquiry records are stored in Neon and resumes in private Blob storage. The database tables are created automatically when the API is first used.
+- Local development continues to use the Excel workbooks. Vercel job-search data can be updated by uploading an `.xlsx` workbook at `/admin/openings`; it must contain an `Openings` sheet with `Position` and `Location` headers.
+- Set a strong `ADMIN_UPLOAD_TOKEN` environment variable in the Vercel project before using the admin upload page. The uploaded workbook replaces the current job-search openings; invalid or empty sheets are rejected.
+- Vercel starts with empty openings tables. The current local workbook is not automatically uploaded during deployment.
 
 ## Available job openings
 
