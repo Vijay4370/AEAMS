@@ -1990,7 +1990,8 @@ function AdminOpeningsPage() {
 
   async function handleUpload(event) {
     event.preventDefault()
-    const formData = new FormData(event.currentTarget)
+    const form = event.currentTarget
+    const formData = new FormData(form)
     setIsUploading(true)
     setMessage(null)
 
@@ -2015,7 +2016,7 @@ function AdminOpeningsPage() {
         type: 'success',
         text: `Updated ${result.openingsCount} job openings.`,
       })
-      event.currentTarget.reset()
+      form.reset()
       setToken('')
     } catch (error) {
       console.error('Failed to upload openings workbook', error)
