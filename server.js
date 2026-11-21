@@ -1,4 +1,6 @@
 import ExcelJS from 'exceljs'
+import { neon } from '@neondatabase/serverless'
+import { del, put } from '@vercel/blob'
 import { createHash, randomUUID } from 'node:crypto'
 import express from 'express'
 import multer from 'multer'
@@ -8,6 +10,7 @@ import { fileURLToPath } from 'node:url'
 
 const projectDirectory = path.dirname(fileURLToPath(import.meta.url))
 const production = process.argv.includes('--production')
+const isVercel = process.env.VERCEL === '1'
 const port = Number(process.env.PORT) || (production ? 3000 : 3001)
 const inquiryDirectory = path.resolve(
   process.env.INQUIRIES_DIR || path.join(projectDirectory, 'data', 'inquiries'),
@@ -15,7 +18,7 @@ const inquiryDirectory = path.resolve(
 const resumeDirectory = path.resolve(
   process.env.RESUMES_DIR || path.join(projectDirectory, 'data', 'resumes'),
 )
-const maximumResumeSizeBytes = 5 * 1024 * 1024
+const maximumResumeSizeBytes = 4 * 1024 * 1024
 const urgentHiringDirectory = path.resolve(
   process.env.URGENT_HIRING_DIR || path.join(projectDirectory, 'data'),
 )
@@ -53,6 +56,10 @@ const roleFiles = new Map([
 ])
 
 const writeQueues = new Map()
+const databaseUrl =
+  process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_URL_NON_POOLING
+const database = databaseUrl ? neon(databaseUrl) : null
+let databaseSchemaPromise
 const workbookColumns = [
   { header: 'Submitted At (UTC)', key: 'submittedAt', width: 26 },
   { header: 'Full Name', key: 'name', width: 28 },
@@ -135,6 +142,7 @@ app.post('/api/inquiries', handleResumeUpload, async (request, response) => {
   const fileName = roleFiles.get(inquiry.service) || roleFiles.get('Other')
   const filePath = path.join(inquiryDirectory, fileName)
   let savedResumePath
+  let savedResumeBlobPath
 
   try {
     let resumeFile = ''
@@ -145,12 +153,25 @@ app.post('/api/inquiries', handleResumeUpload, async (request, response) => {
         })
       }
 
-      await mkdir(resumeDirectory, { recursive: true })
       const resumeFileName = `${randomUUID()}${path.extname(request.file.originalname).toLowerCase()}`
-      const targetResumePath = path.join(resumeDirectory, resumeFileName)
-      await writeFile(targetResumePath, request.file.buffer, { flag: 'wx' })
-      savedResumePath = targetResumePath
-      resumeFile = path.relative(projectDirectory, targetResumePath).split(path.sep).join('/')
+      if (isVercel) {
+        await getDatabase()
+        const blobPath = `resumes/${resumeFileName}`
+        const blob = await put(blobPath, request.file.buffer, {
+          access: 'private',
+          token: getBlobToken(),
+          addRandomSuffix: false,
+          contentType: request.file.mimetype,
+        })
+        savedResumeBlobPath = blob.pathname
+        resumeFile = blob.pathname
+      } else {
+        await mkdir(resumeDirectory, { recursive: true })
+        const targetResumePath = path.join(resumeDirectory, resumeFileName)
+        await writeFile(targetResumePath, request.file.buffer, { flag: 'wx' })
+        savedResumePath = targetResumePath
+        resumeFile = path.relative(projectDirectory, targetResumePath).split(path.sep).join('/')
+      }
     }
 
     const record = {
@@ -158,9 +179,20 @@ app.post('/api/inquiries', handleResumeUpload, async (request, response) => {
       resumeFile,
       submittedAt: new Date().toISOString(),
     }
-    await queueWorkbookWrite(fileName, () => appendInquiry(filePath, record))
+    if (isVercel) {
+      await saveInquiryToDatabase(record)
+    } else {
+      await queueWorkbookWrite(fileName, () => appendInquiry(filePath, record))
+    }
     return response.status(201).json({ fileName })
   } catch (error) {
+    if (savedResumeBlobPath) {
+      try {
+        await del(savedResumeBlobPath, { token: getBlobToken() })
+      } catch (cleanupError) {
+        console.error('Failed to remove an unrecorded resume upload', cleanupError)
+      }
+    }
     if (savedResumePath) {
       try {
         await unlink(savedResumePath)
@@ -177,7 +209,7 @@ app.post('/api/inquiries', handleResumeUpload, async (request, response) => {
   }
 })
 
-if (production) {
+if (production && !isVercel) {
   const buildDirectory = path.join(projectDirectory, 'dist')
   app.use(express.static(buildDirectory))
   app.use((request, response, next) => {
@@ -189,21 +221,25 @@ if (production) {
   })
 }
 
-app.listen(port, '0.0.0.0', () => {
-  console.log(`AEAMS ${production ? 'website and API' : 'API'} listening on port ${port}`)
-  readUrgentHiring().catch((error) => {
-    console.error('Failed to initialize urgent hiring workbook', error)
+if (!isVercel) {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`AEAMS ${production ? 'website and API' : 'API'} listening on port ${port}`)
+    readUrgentHiring().catch((error) => {
+      console.error('Failed to initialize urgent hiring workbook', error)
+    })
+    readOpenings().catch((error) => {
+      console.error('Failed to initialize openings workbook', error)
+    })
   })
-  readOpenings().catch((error) => {
-    console.error('Failed to initialize openings workbook', error)
-  })
-})
 
-setInterval(() => {
-  readUrgentHiring().catch((error) => {
-    console.error('Failed to clean expired urgent hiring entries', error)
-  })
-}, 30 * 60 * 1000)
+  setInterval(() => {
+    readUrgentHiring().catch((error) => {
+      console.error('Failed to clean expired urgent hiring entries', error)
+    })
+  }, 30 * 60 * 1000)
+}
+
+export default app
 
 function validateInquiry(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -275,7 +311,7 @@ function handleResumeUpload(request, response, next) {
 
     if (error instanceof multer.MulterError && error.code === 'LIMIT_FILE_SIZE') {
       return response.status(413).json({
-        error: 'Resume files must be 5 MB or smaller.',
+        error: 'Resume files must be 4 MB or smaller.',
       })
     }
 
@@ -320,6 +356,31 @@ function readString(value) {
 }
 
 async function readUrgentHiring() {
+  if (isVercel) {
+    const sql = await getDatabase()
+    const rows = await sql`
+      SELECT position, qualification, location, salary, experience, facility,
+             contact1, contact2, posted_at
+      FROM aeams_urgent_hiring
+      WHERE posted_at > NOW() - INTERVAL '24 hours'
+      ORDER BY posted_at DESC
+    `
+    return {
+      openings: rows.map((row) => ({
+        position: row.position,
+        qualification: row.qualification,
+        location: row.location,
+        salary: row.salary,
+        experience: row.experience,
+        facility: row.facility,
+        contact1: row.contact1,
+        contact2: row.contact2,
+        postedAt: new Date(row.posted_at).toISOString(),
+      })),
+      warnings: [],
+    }
+  }
+
   await mkdir(urgentHiringDirectory, { recursive: true })
 
   const workbook = new ExcelJS.Workbook()
@@ -459,6 +520,19 @@ async function readUrgentHiring() {
 }
 
 async function readOpenings() {
+  if (isVercel) {
+    const sql = await getDatabase()
+    const rows = await sql`
+      SELECT position, location
+      FROM aeams_openings
+      ORDER BY id
+    `
+    return rows.map((row) => ({
+      position: row.position,
+      location: row.location,
+    }))
+  }
+
   await mkdir(urgentHiringDirectory, { recursive: true })
 
   const workbook = new ExcelJS.Workbook()
@@ -593,4 +667,97 @@ async function appendInquiry(filePath, inquiry) {
 
   worksheet.addRow(inquiry)
   await workbook.xlsx.writeFile(filePath)
+}
+
+async function getDatabase() {
+  if (!database) {
+    throw new Error(
+      'Configure DATABASE_URL or POSTGRES_URL for the Vercel deployment.',
+    )
+  }
+
+  if (!databaseSchemaPromise) {
+    databaseSchemaPromise = (async () => {
+      await database`
+        CREATE TABLE IF NOT EXISTS aeams_openings (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          position TEXT NOT NULL,
+          location TEXT NOT NULL
+        )
+      `
+      await database`
+        CREATE TABLE IF NOT EXISTS aeams_urgent_hiring (
+          id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+          position TEXT NOT NULL,
+          qualification TEXT NOT NULL DEFAULT '',
+          location TEXT NOT NULL DEFAULT '',
+          salary TEXT NOT NULL DEFAULT '',
+          experience TEXT NOT NULL DEFAULT '',
+          facility TEXT NOT NULL DEFAULT '',
+          contact1 TEXT NOT NULL DEFAULT '',
+          contact2 TEXT NOT NULL DEFAULT '',
+          posted_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+      `
+      await database`
+        CREATE TABLE IF NOT EXISTS aeams_inquiries (
+          id TEXT PRIMARY KEY,
+          submitted_at TIMESTAMPTZ NOT NULL,
+          name TEXT NOT NULL,
+          phone TEXT NOT NULL,
+          email TEXT NOT NULL,
+          company TEXT NOT NULL,
+          preferred_location TEXT NOT NULL,
+          preferred_profile TEXT NOT NULL,
+          current_salary TEXT NOT NULL,
+          notice_period TEXT NOT NULL,
+          total_experience TEXT NOT NULL,
+          expected_salary TEXT NOT NULL,
+          current_location TEXT NOT NULL,
+          home_town TEXT NOT NULL,
+          service TEXT NOT NULL,
+          message TEXT NOT NULL,
+          resume_file TEXT NOT NULL
+        )
+      `
+      await database`
+        CREATE INDEX IF NOT EXISTS aeams_urgent_hiring_posted_at_idx
+        ON aeams_urgent_hiring (posted_at DESC)
+      `
+    })()
+  }
+
+  try {
+    await databaseSchemaPromise
+  } catch (error) {
+    databaseSchemaPromise = undefined
+    throw error
+  }
+
+  return database
+}
+
+function getBlobToken() {
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    throw new Error('Configure BLOB_READ_WRITE_TOKEN for the Vercel deployment.')
+  }
+
+  return process.env.BLOB_READ_WRITE_TOKEN
+}
+
+async function saveInquiryToDatabase(inquiry) {
+  const sql = await getDatabase()
+  await sql`
+    INSERT INTO aeams_inquiries (
+      id, submitted_at, name, phone, email, company, preferred_location,
+      preferred_profile, current_salary, notice_period, total_experience,
+      expected_salary, current_location, home_town, service, message, resume_file
+    ) VALUES (
+      ${randomUUID()}, ${inquiry.submittedAt}, ${inquiry.name}, ${inquiry.phone},
+      ${inquiry.email}, ${inquiry.company}, ${inquiry.preferredLocation},
+      ${inquiry.preferredProfile}, ${inquiry.currentSalary}, ${inquiry.noticePeriod},
+      ${inquiry.totalExperience}, ${inquiry.expectedSalary}, ${inquiry.currentLocation},
+      ${inquiry.homeTown}, ${inquiry.service}, ${inquiry.message}, ${inquiry.resumeFile}
+    )
+  `
 }

@@ -776,7 +776,7 @@ function ContactPage() {
             />
           </label>
           <label>
-            Resume (PDF, DOC, or DOCX, up to 5 MB)
+            Resume (PDF, DOC, or DOCX, up to 4 MB)
             <input name="resume" type="file" accept=".pdf,.doc,.docx" required />
           </label>
           <button className="contact-form-submit" type="submit" disabled={isSubmitting}>
